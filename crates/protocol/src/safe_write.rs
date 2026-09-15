@@ -1436,8 +1436,24 @@ pub fn syntakt_safe_write_tracks(
 
     let mut payload = original.clone();
     let mut written = 0usize;
+    // **Only the steps the destination plays.** A pattern shortened on the box
+    // keeps the trigs past its new length and never plays them — A02's T12
+    // held 24 of them on 2026-09-15 — and the import now leaves those out of
+    // the roll. A write that went on to encode all 64 steps would clear every
+    // one of them, so the steps past the destination's length go back exactly
+    // as fetched, and a note authored out there is refused by count rather
+    // than written somewhere the box will never sound it.
+    let length = match st::pattern_length_steps(&original) {
+        Some(l) if (1..=st::NUM_STEPS).contains(&usize::from(l)) => usize::from(l),
+        _ => st::NUM_STEPS,
+    };
+    let mut past_length = 0usize;
     for write in writes {
         for (step, authored) in write.steps.iter().enumerate() {
+            if step >= length {
+                past_length += usize::from(authored.is_some());
+                continue;
+            }
             let note = authored.map(|t| st::SyntaktNote {
                 step,
                 note: t.note,
@@ -1475,13 +1491,26 @@ pub fn syntakt_safe_write_tracks(
     let reread = device.fetch_pattern_kit(index).map_err(WriteError::Io)?;
     let diffs = diff_payloads(&payload, &reread, VERIFY_DIFF_CAP);
 
+    let mut warnings = Vec::new();
+    if past_length > 0 {
+        warnings.push(format!(
+            "{} sat past {label}'s length of {length} steps and {} not written — the box \
+             would store {} and never play {}, and what it already keeps out there was left \
+             as it was",
+            plural(past_length, "note"),
+            if past_length == 1 { "was" } else { "were" },
+            if past_length == 1 { "it" } else { "them" },
+            if past_length == 1 { "it" } else { "them" },
+        ));
+    }
+
     Ok(WriteResult {
         ok: diffs.is_empty(),
         cancelled: false,
         diffs,
-        dropped: 0,
+        dropped: past_length,
         written,
-        warnings: Vec::new(),
+        warnings,
         label,
         index,
         tracks: writes.iter().map(|w| w.track_index).collect(),

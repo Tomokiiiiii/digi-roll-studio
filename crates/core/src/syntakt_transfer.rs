@@ -80,12 +80,27 @@ pub struct SyntaktImportReport {
     pub from_slot: u8,
     pub notes: usize,
     pub tracks_with_notes: usize,
-    /// Steps holding a trig that sounds no note. This model holds notes, not
-    /// trigs, so they have no representation and are counted rather than
-    /// imported. **A write-back leaves them exactly as they are** — see
-    /// `syntakt_pattern::set_step` — so this is a display gap and not a
-    /// destruction risk.
+    /// Steps carrying a parameter lock and no note trig — a lock trig. This
+    /// model holds notes, not trigs, so they have no representation and are
+    /// counted rather than imported. **A write-back leaves them exactly as they
+    /// are** — see `syntakt_pattern::set_step` — so this is a display gap and
+    /// not a destruction risk.
+    ///
+    /// **Counted from the pool, since 2026-09-15.** It was counted from the
+    /// trig word before that — any step not empty and not playing a note — and
+    /// a beta test on hardware found residue that way: B01's T1 step 11 read
+    /// `03 80`, had no lane, and was not lit on the box. A lock in the pool on a
+    /// step that plays no note is evidence the box put something there.
     pub trigless_dropped: usize,
+    /// Trigs stored past the pattern's length. The box keeps them and never
+    /// plays them, so neither does this: they are left out of the roll and
+    /// counted, the same bargain `import::ImportReport::trimmed_past_len` makes
+    /// for the digis.
+    ///
+    /// Found on hardware 2026-09-15: A02's T12 is 16 steps long and plays 8
+    /// trigs, and its payload holds the same 8 at steps 17-32, 33-48 and 49-64
+    /// as well. All 32 were imported until then.
+    pub trimmed_past_len: usize,
     /// Trigs whose note lane read `FF` and took the track's default.
     pub notes_from_track_default: usize,
     /// Trigs that arrived carrying a condition. A count, not a loss.
@@ -160,13 +175,29 @@ pub fn syntakt_pattern_to_model(
         from_slot: slot,
         ..Default::default()
     };
-    let length = st::pattern_length_steps(payload).unwrap_or(st::NUM_STEPS as u8);
+    // Clamped rather than trusted: a length byte of 0, or past the 64 steps a
+    // block holds, would make every track a loop of nothing or read off the end.
+    let length = match st::pattern_length_steps(payload) {
+        Some(l) if (1..=st::NUM_STEPS).contains(&usize::from(l)) => usize::from(l),
+        _ => st::NUM_STEPS,
+    };
+    let tracks = st::NUM_BLOCKS.min(model.num_tracks);
+    // **Counted before the tracks, and never carried.** This field was declared
+    // and shown on the panel and never assigned until a beta test on hardware
+    // noticed its line was missing; see the module doc for why lanes stay on
+    // the box.
+    let lanes = st::plock_lanes(payload);
+    report.plock_lanes_not_carried = lanes.iter().filter(|l| l.track < tracks).count();
 
-    for (t, track_name) in
-        TRACK_NAMES.iter().enumerate().take(st::NUM_BLOCKS.min(model.num_tracks))
-    {
+    for (t, track_name) in TRACK_NAMES.iter().enumerate().take(tracks) {
         let mut notes = Vec::new();
         for trig in st::track_notes(payload, t) {
+            // Before anything counts it: a trig the box never plays is not a
+            // note with a condition or a default, it is stored data.
+            if trig.step >= length {
+                report.trimmed_past_len += 1;
+                continue;
+            }
             // `track_notes` has already resolved an unset lane to the track's
             // default, which is what the box itself sounds; the raw `FF` would
             // drop a step that plays.
@@ -196,9 +227,16 @@ pub fn syntakt_pattern_to_model(
             note.cond = cond;
             notes.push(note);
         }
-        report.trigless_dropped += (0..st::NUM_STEPS)
-            .filter(|&s| !st::step_is_empty(payload, t, s) && !st::plays_note(payload, t, s))
-            .count();
+        let mut locked: Vec<usize> = lanes
+            .iter()
+            .filter(|l| l.track == t)
+            .flat_map(|l| l.steps.iter().copied())
+            .filter(|&s| s < length)
+            .collect();
+        locked.sort_unstable();
+        locked.dedup();
+        report.trigless_dropped +=
+            locked.iter().filter(|&&s| !st::plays_note(payload, t, s)).count();
         report.notes += notes.len();
         report.tracks_with_notes += usize::from(!notes.is_empty());
 
@@ -656,6 +694,72 @@ mod tests {
         assert_eq!(t.channel, 9);
         assert!(t.mute);
         assert_eq!(t.notes.len(), 8, "and the pattern still arrived");
+    }
+
+    // --- the 2026-09-15 beta test ---------------------------------------------
+
+    /// A capture off the beta test. Every value in B01 was programmed on the
+    /// box first, so each assertion below had an answer before it was fetched.
+    fn beta(name: &str) -> Vec<u8> {
+        dump(&format!("syntakt-2026-09-15/beta-test/{name}"))
+    }
+
+    /// **Mismatch 1.** B01 carries one lane — FLTR RESO on T2 — and the panel
+    /// said nothing about it, because this count was never assigned.
+    #[test]
+    fn a_lane_on_the_box_is_counted_so_the_panel_can_say_it_stays_there() {
+        let (_, report) = syntakt_pattern_to_model(&SYNTAKT, 16, &beta("B01-known-values.bin")).unwrap();
+        assert_eq!(report.plock_lanes_not_carried, 1);
+        let (_, report) = syntakt_pattern_to_model(&SYNTAKT, 0, &dump("syntakt-2026-09-10/stride-H01/empty-A01.bin")).unwrap();
+        assert_eq!(report.plock_lanes_not_carried, 0);
+    }
+
+    /// **Mismatch 2.** The summary reported one trig that sounds no note, and
+    /// the box showed nothing there. T1 step 11 is residue; T2 step 11 is a
+    /// note trig with a lock on it. Neither is a lock trig.
+    #[test]
+    fn residue_on_a_step_is_not_reported_as_a_trig() {
+        let (pattern, report) =
+            syntakt_pattern_to_model(&SYNTAKT, 16, &beta("B01-known-values.bin")).unwrap();
+        assert_eq!(report.trigless_dropped, 0);
+        assert_eq!(report.notes, 7, "four on T1 and three on T2, as programmed");
+        assert_eq!(pattern.track(0).unwrap().notes.len(), 4);
+        assert_eq!(pattern.track(1).unwrap().notes.len(), 3);
+    }
+
+    /// Every field B01 was programmed with, read the way the roll shows it.
+    /// The micro on T1 step 9 is minus: that is what was typed on the box.
+    #[test]
+    fn b01_arrives_with_every_value_it_was_programmed_with() {
+        let (pattern, _) = syntakt_pattern_to_model(&SYNTAKT, 16, &beta("B01-known-values.bin")).unwrap();
+        assert_eq!(pattern.swing, 58);
+        assert!(pattern.tracks().iter().all(|t| t.length_steps == 32));
+
+        let t1 = &pattern.track(0).unwrap().notes;
+        assert_eq!(t1.iter().map(|n| n.step).collect::<Vec<_>>(), vec![0.0, 4.0, 8.0, 12.0]);
+        assert_eq!((t1[1].pitch, t1[1].velocity), (64, 80), "E5 at 80");
+        assert_eq!(t1[2].len, 0.5, "1/32");
+        assert!((t1[2].micro + 1.0 / 3.0).abs() < 1e-9, "-1/48 of a bar");
+        assert_eq!(t1[3].cond.as_deref(), Some("1:2"));
+
+        let t2 = &pattern.track(1).unwrap().notes;
+        assert_eq!(t2.iter().map(|n| n.step).collect::<Vec<_>>(), vec![2.0, 6.0, 10.0]);
+        assert_eq!(t2[0].prob, Some(50));
+        assert_eq!(t2[1].cond.as_deref(), Some("PRE"));
+        assert!((t2[1].micro + 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    /// **Mismatch 3.** A02's T12 is 16 steps and plays 8 trigs; the payload
+    /// holds 32. The box keeps the other 24 and never plays them.
+    #[test]
+    fn trigs_past_the_pattern_length_stay_out_of_the_roll_and_are_counted() {
+        let (pattern, report) =
+            syntakt_pattern_to_model(&SYNTAKT, 1, &beta("A02-trigs-past-length.bin")).unwrap();
+        let t12 = &pattern.track(11).unwrap().notes;
+        assert_eq!(t12.len(), 8);
+        assert!(t12.iter().all(|n| n.step < 16.0));
+        assert_eq!(report.trimmed_past_len, 24);
+        assert_eq!(report.notes, 9, "what the box plays: one on T1, eight on T12");
     }
 
     // --- export --------------------------------------------------------------

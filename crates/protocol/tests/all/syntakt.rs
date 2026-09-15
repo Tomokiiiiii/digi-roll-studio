@@ -414,3 +414,58 @@ fn a_condition_off_the_menu_has_no_byte() {
     assert_eq!(st::condition_byte(&st::SyntaktCond::Ratio { a: 3, b: 2 }), None);
     assert_eq!(st::condition_byte(&st::SyntaktCond::Ratio { a: 0, b: 4 }), None);
 }
+
+// --- the p-lock pool, and the 2026-09-15 beta captures -------------------------
+
+/// A capture off the beta test, where every value was programmed on the box
+/// beforehand so each one had an expected answer.
+fn beta(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dumps/syntakt-2026-09-15/beta-test")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+/// B01 had one lock programmed: FLTR RESO on T2, step 11.
+#[test]
+fn the_pool_holds_the_one_lock_b01_was_given() {
+    let lanes = st::plock_lanes(&beta("B01-known-values.bin"));
+    assert_eq!(lanes, vec![st::PlockLane { param_id: 29, track: 1, steps: vec![10] }]);
+}
+
+/// The 2026-09-10 session added a RESO lock on track 7 step 5 to a pattern
+/// that already held two lanes on track 12, and saw the pool re-sort. Read back
+/// here in the order the box keeps them: 19, 29, 47.
+#[test]
+fn the_pool_reads_back_sorted_by_param_id_as_the_box_keeps_it() {
+    let lanes = st::plock_lanes(&dump("stride-H01/plock-after.bin"));
+    let ids: Vec<u8> = lanes.iter().map(|l| l.param_id).collect();
+    assert_eq!(ids, vec![19, 29, 47]);
+    let reso = lanes.iter().find(|l| l.param_id == 29).unwrap();
+    assert_eq!((reso.track, reso.steps.clone()), (6, vec![4]));
+}
+
+/// A free record is `FF FF` and zeros. Zeros read as values would be 64 locks
+/// per record, so the header has to be what decides.
+#[test]
+fn an_empty_pattern_has_nothing_in_its_pool() {
+    let empty = dump("stride-H01/empty-A01.bin");
+    assert!(st::plock_lanes(&empty).is_empty());
+}
+
+/// **The residue that was reported as a trig.** B01's T1 step 11 has trig bits
+/// set and the note bit clear, and nothing on the box is lit there. Pinned
+/// here as the shape it is, so the next reader of `step_is_empty` does not
+/// take the gap between it and `plays_note` for a parameter-only trig again.
+#[test]
+fn b01_t1_step_11_is_residue_with_no_lock_behind_it() {
+    let b01 = beta("B01-known-values.bin");
+    assert_eq!(st::trig_word(&b01, 0, 10), Some((0x03, 0x80)));
+    assert!(!st::step_is_empty(&b01, 0, 10));
+    assert!(!st::plays_note(&b01, 0, 10));
+    assert!(
+        st::plock_lanes(&b01).iter().all(|l| l.track != 0),
+        "no lane on T1, so nothing makes this a lock trig"
+    );
+}
+

@@ -365,3 +365,61 @@ fn the_other_slot_is_untouched_and_the_confirm_names_the_one_being_written() {
     assert_eq!(hooks.confirms[0].0, "A01");
     assert_eq!(hooks.confirms[0].3, vec![(5, 0, 1)], "no trigs there before, one authored");
 }
+
+/// The beta-test capture where a shortened pattern still holds trigs past its
+/// length: A02, 16 steps, with T12's eight trigs stored again at 17-64.
+fn a02() -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dumps/syntakt-2026-09-15/beta-test/A02-trigs-past-length.bin");
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+/// **What the box keeps past a pattern's length, a write keeps too.** The
+/// import leaves those trigs out of the roll, so a write that encoded all 64
+/// steps would clear 24 trigs off A02's T12 that nobody was shown.
+#[test]
+fn a_write_leaves_the_steps_past_the_destinations_length_exactly_as_fetched() {
+    let mut box_ = FakeSyntakt::new();
+    box_.slots.insert(0, a02());
+    let before = box_.slots[&0].clone();
+    let stash = tmp_stash("past-length");
+    let mut hooks = Recorder::default();
+
+    // T12's first bar only, which is all the import would have shown.
+    syntakt_safe_write_tracks(&mut box_, &stash, &[write_for(11, &[0, 4, 8, 12])], &mut hooks, NOW)
+        .expect("should write");
+
+    let after = &box_.slots[&0];
+    for step in 16..st::NUM_STEPS {
+        let word = st::BLOCK_BASE + st::BLOCK_STRIDE * 11 + st::TRIG_LANE + step * 2;
+        assert_eq!(
+            (after[word], after[word + 1]),
+            (before[word], before[word + 1]),
+            "T12 step {} past the length was touched",
+            step + 1
+        );
+    }
+    assert_eq!(
+        (16..st::NUM_STEPS).filter(|&s| st::plays_note(after, 11, s)).count(),
+        24,
+        "the box's hidden trigs are all still there"
+    );
+    assert_eq!(st::trig_count(after, 11) - 24, 4, "and the first bar is what was drawn");
+}
+
+/// A note drawn past the destination's length is refused by count and named,
+/// rather than written somewhere the box will never sound it.
+#[test]
+fn a_note_past_the_destinations_length_is_counted_and_named_not_written() {
+    let mut box_ = FakeSyntakt::new();
+    box_.slots.insert(0, a02());
+    let stash = tmp_stash("past-length-authored");
+    let mut hooks = Recorder::default();
+    let result =
+        syntakt_safe_write_tracks(&mut box_, &stash, &[write_for(0, &[0, 20, 40])], &mut hooks, NOW)
+            .expect("should write");
+    assert_eq!(result.written, 1);
+    assert_eq!(result.dropped, 2);
+    assert!(result.warnings.iter().any(|w| w.contains("length of 16 steps")), "{:?}", result.warnings);
+}
+

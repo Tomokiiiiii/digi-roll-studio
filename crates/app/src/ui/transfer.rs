@@ -414,6 +414,17 @@ impl TransferPanel {
             }
             Some(Outcome::ImportedSyntakt { into, report }) => {
                 ui.colored_label(egui::Color32::LIGHT_GREEN, syntakt_summary(*into, report));
+                // The gen-2 row's sentence, for the gen-2 row's reason — the box
+                // holds these and does not play them, so the roll does not
+                // either. A02's T12 on 2026-09-15 is where this was missing.
+                if report.trimmed_past_len > 0 {
+                    ui.weak(format!(
+                        "{} trig(s) sat past the pattern's length and were left out — the box \
+                         stores those and does not play them either, and a write back leaves them \
+                         where they are",
+                        report.trimmed_past_len
+                    ));
+                }
                 if report.trigless_dropped > 0 {
                     ui.weak(format!(
                         "{} trig(s) on the box sound no note and are not drawn — this app holds \
@@ -835,6 +846,9 @@ fn syntakt_summary(into: PatternRef, report: &SyntaktImportReport) -> String {
             "{} condition(s) past this decoder's menu",
             report.conditions_off_the_menu
         ));
+    }
+    if report.trimmed_past_len > 0 {
+        caveats.push(format!("{} trig(s) past the length left out", report.trimmed_past_len));
     }
     format!(
         "Into {} · {} note(s) on {} track(s){}",

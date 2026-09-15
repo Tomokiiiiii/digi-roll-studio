@@ -176,11 +176,20 @@ pub fn trig_word(payload: &[u8], track: usize, step: usize) -> Option<(u8, u8)> 
 /// published format map calls that bit a structural marker for the step's
 /// position, which agrees with every capture here.
 ///
-/// **The gap between this and [`plays_note`] is the interesting one.** A step
-/// that is not empty and plays no note holds something this model has no words
-/// for — a trig with parameter locks and no note, which the DN2 map calls `0x78`
-/// — and every caller that edits a track has to leave those alone rather than
-/// clear them. [`set_step`] does.
+/// **What the gap between this and [`plays_note`] does not tell you.** This
+/// said, until 2026-09-15, that a step which is not empty and plays no note
+/// holds a trig with parameter locks and no note. A beta test on hardware
+/// showed otherwise: B01's T1 step 11 read `03 80` — trig bits set, note bit
+/// clear — with no pool lane for T1 and **nothing lit on the box**. That is
+/// residue, and a count built on this gap reported it as a trig.
+///
+/// So this is only a statement about the word's shape. Evidence that a step
+/// carries a parameter-only trig comes from the pool — see [`plock_lanes`] —
+/// not from here. What this box writes for a real one is still unmeasured; the
+/// DN2 map's `0x78` is not what this residue looks like.
+///
+/// [`set_step`] still leaves such a step alone, and that rule stands on its own:
+/// residue kept is harmless, and a real lock trig kept is the point.
 pub fn step_is_empty(payload: &[u8], track: usize, step: usize) -> bool {
     match trig_word(payload, track, step) {
         None => true,
@@ -286,6 +295,61 @@ pub fn swing_percent(payload: &[u8]) -> Option<u8> {
 /// How many steps the pattern runs before it wraps.
 pub fn pattern_length_steps(payload: &[u8]) -> Option<u8> {
     payload.get(PATTERN_LENGTH).copied()
+}
+
+// --- The p-lock pool ------------------------------------------------------------
+
+/// Where the pool starts: 80 records of [`PLOCK_RECORD_BYTES`], ending at 23183.
+///
+/// Measured on 2026-09-10 and written up in
+/// `dumps/syntakt-2026-09-10/stride-H01/README.md`, including the one way this
+/// box differs from the digis — it keeps records sorted by paramId and shifts
+/// to make room, where the digis take the lowest free record.
+pub const PLOCK_POOL: usize = 12_783;
+/// How many records the pool holds.
+pub const PLOCK_RECORDS: usize = 80;
+/// One record: a two-byte `(paramId, track)` header, then 64 big-endian 16-bit
+/// values, one per step.
+pub const PLOCK_RECORD_BYTES: usize = 130;
+/// A free record's header. Its 128 value bytes are zero, not `FFFF`.
+pub const PLOCK_FREE: [u8; 2] = [0xFF, 0xFF];
+/// A step with no lock, inside a record that is in use.
+pub const PLOCK_NO_VALUE: u16 = 0xFFFF;
+
+/// One record in use: which parameter, on which block, locked on which steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlockLane {
+    /// The box's own parameter number. Only `29` (FLTR RESO) is named.
+    pub param_id: u8,
+    /// Zero-based block, the same numbering as every other block function here.
+    pub track: usize,
+    /// Zero-based steps carrying a value, in step order.
+    pub steps: Vec<usize>,
+}
+
+/// Every record in use, in the order the box keeps them.
+///
+/// **Read, not decoded.** A value is the display number × 256, but with one
+/// paramId named out of an unknown total there is nothing to show beside it,
+/// so this reports *that* a step is locked and not *to what*. That is enough
+/// for what the import needs it for: to say a pattern carries automation the
+/// app will not show, and to tell a real parameter-only trig from residue.
+pub fn plock_lanes(payload: &[u8]) -> Vec<PlockLane> {
+    let mut lanes = Vec::new();
+    for record in 0..PLOCK_RECORDS {
+        let at = PLOCK_POOL + record * PLOCK_RECORD_BYTES;
+        let Some(bytes) = payload.get(at..at + PLOCK_RECORD_BYTES) else {
+            break;
+        };
+        if bytes[..2] == PLOCK_FREE {
+            continue;
+        }
+        let steps = (0..NUM_STEPS)
+            .filter(|s| u16::from_be_bytes([bytes[2 + 2 * s], bytes[3 + 2 * s]]) != PLOCK_NO_VALUE)
+            .collect();
+        lanes.push(PlockLane { param_id: bytes[0], track: usize::from(bytes[1]), steps });
+    }
+    lanes
 }
 
 // --- Trig conditions ---------------------------------------------------------
