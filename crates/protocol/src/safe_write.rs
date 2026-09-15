@@ -497,6 +497,12 @@ pub struct WriteResult {
     pub cancelled: bool,
     pub diffs: Vec<ByteDiff>,
     pub dropped: usize,
+    /// Notes left unwritten **because the confirm step said they would be** —
+    /// on the Syntakt, the ones authored past the destination's length.
+    /// Informational, so unlike [`WriteResult::warnings`] it never makes a
+    /// successful write read as a failure: a skip that was agreed to is not a
+    /// loss.
+    pub skipped: usize,
     pub written: usize,
     /// What landed differently from what was asked for while still being a
     /// successful write — a full lane pool, say. Callers show these alongside
@@ -719,6 +725,7 @@ pub fn safe_write_tracks(
             cancelled: true,
             diffs: Vec::new(),
             dropped: 0,
+            skipped: 0,
             written: 0,
             warnings: Vec::new(),
             label,
@@ -831,6 +838,7 @@ pub fn safe_write_tracks(
         cancelled: false,
         diffs,
         dropped,
+        skipped: 0,
         written,
         warnings,
         label,
@@ -1060,6 +1068,7 @@ pub fn a4_safe_write_tracks(
             cancelled: true,
             diffs: Vec::new(),
             dropped: 0,
+            skipped: 0,
             written: 0,
             warnings: Vec::new(),
             label,
@@ -1189,6 +1198,7 @@ pub fn a4_safe_write_tracks(
         cancelled: false,
         diffs,
         dropped: 0,
+        skipped: 0,
         written,
         warnings: plock_warnings,
         label,
@@ -1402,6 +1412,7 @@ pub fn syntakt_safe_write_tracks(
             cancelled: true,
             diffs: Vec::new(),
             dropped: 0,
+            skipped: 0,
             written: 0,
             warnings: Vec::new(),
             label,
@@ -1461,11 +1472,18 @@ pub fn syntakt_safe_write_tracks(
                 length_byte: t.length_byte,
                 micro_ticks: t.micro_ticks,
                 condition_byte: t.condition_byte,
-                // Every lane written explicitly rather than left at `FF`:
-                // a trig following the track default would move when somebody
-                // changes that default on the box later, which is not what was
-                // drawn.
-                locked: st::Locks { note: true, velocity: true, length: true },
+                // Against the destination as fetched, lane by lane: a default
+                // that was being followed and still is stays `FF`, and a lock
+                // stays a lock. See `locks_for` for the A03 write that showed
+                // why locking every lane was wrong.
+                locked: st::locks_for(
+                    &original,
+                    write.track_index,
+                    step,
+                    t.note,
+                    t.velocity,
+                    t.length_byte,
+                ),
             });
             if note.is_some() {
                 written += 1;
@@ -1491,26 +1509,17 @@ pub fn syntakt_safe_write_tracks(
     let reread = device.fetch_pattern_kit(index).map_err(WriteError::Io)?;
     let diffs = diff_payloads(&payload, &reread, VERIFY_DIFF_CAP);
 
-    let mut warnings = Vec::new();
-    if past_length > 0 {
-        warnings.push(format!(
-            "{} sat past {label}'s length of {length} steps and {} not written — the box \
-             would store {} and never play {}, and what it already keeps out there was left \
-             as it was",
-            plural(past_length, "note"),
-            if past_length == 1 { "was" } else { "were" },
-            if past_length == 1 { "it" } else { "them" },
-            if past_length == 1 { "it" } else { "them" },
-        ));
-    }
-
     Ok(WriteResult {
         ok: diffs.is_empty(),
         cancelled: false,
         diffs,
-        dropped: past_length,
+        dropped: 0,
+        // Not a warning. The confirm step names these before consent, so a
+        // warning here turned a write that did exactly what was agreed into a
+        // red "did not go as asked" on hardware, on 2026-09-15.
+        skipped: past_length,
         written,
-        warnings,
+        warnings: Vec::new(),
         label,
         index,
         tracks: writes.iter().map(|w| w.track_index).collect(),
@@ -1556,6 +1565,7 @@ pub fn safe_restore_pattern_kit(
             cancelled: true,
             diffs: Vec::new(),
             dropped: 0,
+            skipped: 0,
             written: 0,
             warnings: Vec::new(),
             label,
@@ -1598,6 +1608,7 @@ pub fn safe_restore_pattern_kit(
         cancelled: false,
         diffs,
         dropped: 0,
+        skipped: 0,
         written: 0,
         warnings: Vec::new(),
         label,
@@ -1780,6 +1791,15 @@ pub fn write_result_message(result: &WriteResult) -> ResultMessage {
                 " ({} didn't fit and {} dropped)",
                 plural(result.dropped, "note"),
                 if result.dropped == 1 { "was" } else { "were" }
+            ));
+        }
+        // The confirm dialog's own words, in the past tense, so the result
+        // reads as the thing that was agreed to rather than as a new loss.
+        if result.skipped > 0 {
+            text.push_str(&format!(
+                " ({} beyond the destination length {} skipped)",
+                plural(result.skipped, "note"),
+                if result.skipped == 1 { "was" } else { "were" }
             ));
         }
         if !result.warnings.is_empty() {

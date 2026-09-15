@@ -107,7 +107,8 @@ pub struct SyntaktImportReport {
     pub conditions: usize,
     /// Condition bytes past the menu this decoder knows. Not carried.
     pub conditions_off_the_menu: usize,
-    /// Parameter-lock lanes the pattern holds, across every track.
+    /// Parameter-lock lanes the pattern holds with at least one locked step,
+    /// across every track. An empty pool record is not counted.
     ///
     /// **Not carried, deliberately** — see the module doc. Reported so the
     /// panel can say the pattern has automation the roll is not showing.
@@ -187,7 +188,12 @@ pub fn syntakt_pattern_to_model(
     // noticed its line was missing; see the module doc for why lanes stay on
     // the box.
     let lanes = st::plock_lanes(payload);
-    report.plock_lanes_not_carried = lanes.iter().filter(|l| l.track < tracks).count();
+    // Only lanes with a lock in them. The pool can hold a record with no value
+    // at all — B01 gained one on T1 between the two beta tests — and counting
+    // it told the panel about automation that is not there. The record itself
+    // stays in the pool: nothing here writes one.
+    report.plock_lanes_not_carried =
+        lanes.iter().filter(|l| l.track < tracks && !l.steps.is_empty()).count();
 
     for (t, track_name) in TRACK_NAMES.iter().enumerate().take(tracks) {
         let mut notes = Vec::new();

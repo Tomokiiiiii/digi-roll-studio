@@ -419,7 +419,86 @@ fn a_note_past_the_destinations_length_is_counted_and_named_not_written() {
         syntakt_safe_write_tracks(&mut box_, &stash, &[write_for(0, &[0, 20, 40])], &mut hooks, NOW)
             .expect("should write");
     assert_eq!(result.written, 1);
-    assert_eq!(result.dropped, 2);
-    assert!(result.warnings.iter().any(|w| w.contains("length of 16 steps")), "{:?}", result.warnings);
+    assert_eq!(result.skipped, 2);
+    assert_eq!(result.dropped, 0, "a skip the confirm step named is not a loss");
+    assert!(result.warnings.is_empty(), "and not a warning: {:?}", result.warnings);
+}
+
+/// **A default that was being followed is still followed.** A step whose lanes
+/// read `FF` and whose value going in is the track's default keeps `FF`, lane by
+/// lane. Before this, every write locked all three lanes of every note.
+#[test]
+fn a_note_at_the_track_default_keeps_following_it_lane_by_lane() {
+    let mut box_ = FakeSyntakt::new();
+    let stash = tmp_stash("default-followed");
+    let (default_note, default_velocity, default_length) =
+        st::defaults(&box_.slots[&0], 0).expect("a whole pattern has defaults");
+    let mut steps = vec![None; st::NUM_STEPS];
+    // Step 0 at every default; step 1 with only its pitch moved off it.
+    steps[0] = Some(SyntaktStep {
+        note: default_note,
+        velocity: default_velocity,
+        length_byte: default_length,
+        micro_ticks: 0,
+        condition_byte: st::NO_LOCK,
+    });
+    steps[1] = Some(SyntaktStep { note: default_note.wrapping_add(1), ..steps[0].unwrap() });
+    let write = SyntaktTrackWrite { index: 0, track_index: 0, steps, swing: None };
+    syntakt_safe_write_tracks(&mut box_, &stash, &[write], &mut Recorder::default(), NOW)
+        .expect("should write");
+
+    let after = &box_.slots[&0];
+    let lanes = |step: usize| {
+        let at = st::BLOCK_BASE + step;
+        (after[at + st::NOTE_LANE], after[at + st::VELOCITY_LANE], after[at + st::LENGTH_LANE])
+    };
+    assert_eq!(lanes(0), (st::NO_LOCK, st::NO_LOCK, st::NO_LOCK));
+    assert_eq!(
+        lanes(1),
+        (default_note.wrapping_add(1), st::NO_LOCK, st::NO_LOCK),
+        "only the pitch locks"
+    );
+    assert_eq!(st::trig_count(after, 0), 2, "and both are trigs");
+}
+
+/// **A lock stays a lock**, even when its value equals the default: that is a
+/// fact about the box a later change to the default would show.
+#[test]
+fn a_lock_equal_to_the_default_is_left_a_lock() {
+    let mut box_ = FakeSyntakt::new();
+    let stash = tmp_stash("lock-kept");
+    let (default_note, default_velocity, default_length) =
+        st::defaults(&box_.slots[&0], 0).expect("a whole pattern has defaults");
+    let at_default = SyntaktStep {
+        note: default_note,
+        velocity: default_velocity,
+        length_byte: default_length,
+        micro_ticks: 0,
+        condition_byte: st::NO_LOCK,
+    };
+    // Lock step 0 at the default values by hand, as an older write would have.
+    for slot in box_.slots.values_mut() {
+        st::set_step(
+            slot,
+            0,
+            0,
+            Some(&st::SyntaktNote {
+                step: 0,
+                note: default_note,
+                velocity: default_velocity,
+                length_byte: default_length,
+                micro_ticks: 0,
+                condition_byte: st::NO_LOCK,
+                locked: st::Locks { note: true, velocity: true, length: true },
+            }),
+        );
+    }
+    let before = box_.slots[&0].clone();
+    let mut steps = vec![None; st::NUM_STEPS];
+    steps[0] = Some(at_default);
+    let write = SyntaktTrackWrite { index: 0, track_index: 0, steps, swing: None };
+    syntakt_safe_write_tracks(&mut box_, &stash, &[write], &mut Recorder::default(), NOW)
+        .expect("should write");
+    assert_eq!(box_.slots[&0], before, "the locks went back as locks");
 }
 

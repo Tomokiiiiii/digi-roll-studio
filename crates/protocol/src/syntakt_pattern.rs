@@ -561,3 +561,49 @@ pub fn set_step(
     }
     true
 }
+
+/// Which of a note's three lockable lanes need a lock to say what it says, when
+/// it is written over `step` of the destination `payload`.
+///
+/// A lane stays [`NO_LOCK`] when it **held** [`NO_LOCK`] and the value going in
+/// is still that track's default. Each lane is decided on its own, so moving a
+/// note's pitch locks the pitch and leaves a default velocity following the
+/// default. A lane that already held a lock keeps one, even when its value
+/// equals the default — "locked to the same value" is a fact about the box that
+/// a later change to the default would show.
+///
+/// Why this exists: a write that locked every lane turned every untouched trig
+/// following its track's default into one locked to that value. On 2026-09-15,
+/// writing one moved pitch back to A03's T2 rewrote 23 lane bytes besides the
+/// one that was edited. Nothing sounded different, but a later change to the
+/// track's NOTE, VEL or LEN would no longer have reached those trigs.
+///
+/// A step with no trig reads [`EMPTY_LANE`], which is [`NO_LOCK`], so a note
+/// authored there at the default follows the default — what the box does with
+/// a trig placed by hand.
+///
+/// Out-of-range indices lock everything, the answer that cannot lose a value.
+pub fn locks_for(
+    payload: &[u8],
+    track: usize,
+    step: usize,
+    note: u8,
+    velocity: u8,
+    length_byte: u8,
+) -> Locks {
+    let all = Locks { note: true, velocity: true, length: true };
+    if step >= NUM_STEPS {
+        return all;
+    }
+    let Some((default_note, default_velocity, default_length)) = defaults(payload, track) else {
+        return all;
+    };
+    let keeps = |offset: usize, value: u8, default: u8| {
+        !(lane(payload, track, offset, step) == Some(NO_LOCK) && value == default)
+    };
+    Locks {
+        note: keeps(NOTE_LANE, note, default_note),
+        velocity: keeps(VELOCITY_LANE, velocity, default_velocity),
+        length: keeps(LENGTH_LANE, length_byte, default_length),
+    }
+}

@@ -469,3 +469,62 @@ fn b01_t1_step_11_is_residue_with_no_lock_behind_it() {
     );
 }
 
+
+// --- the 2026-09-15 beta 2 write test ------------------------------------------
+
+/// A capture off the write test: `*-baseline.bin` read before anything was
+/// written, `*-after-write-roundN.bin` read after a write through the beta.
+fn beta2(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../dumps/syntakt-2026-09-15/beta2-test")
+        .join(name);
+    std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+/// Between the two beta tests B01 gained a pool record with no value in it —
+/// FLTR RESO on T1 — and the T2 lock moved to the second record. The reader
+/// reports the record as it is; what counts as automation is the caller's call.
+#[test]
+fn an_empty_pool_record_reads_as_a_lane_with_no_steps() {
+    assert_eq!(
+        st::plock_lanes(&beta2("B01-baseline.bin")),
+        vec![
+            st::PlockLane { param_id: 29, track: 0, steps: vec![] },
+            st::PlockLane { param_id: 29, track: 1, steps: vec![10] },
+        ]
+    );
+}
+
+/// A03's T2 on the box: eight trigs whose note, velocity and length lanes all
+/// read `FF`, over defaults of 60, 100 and 14.
+#[test]
+fn a_lane_following_the_default_needs_no_lock_for_the_default_value() {
+    let a03 = beta2("A03-baseline.bin");
+    assert_eq!(st::defaults(&a03, 1), Some((60, 100, 14)));
+    assert_eq!(st::locks_for(&a03, 1, 0, 60, 100, 14), st::Locks::default());
+    assert_eq!(
+        st::locks_for(&a03, 1, 4, 61, 100, 14),
+        st::Locks { note: true, velocity: false, length: false },
+        "each lane on its own: the moved pitch locks, the rest keep following"
+    );
+}
+
+/// The same eight trigs after a beta-2 write locked every lane at the default
+/// values. Those are locks now, and they stay locks.
+#[test]
+fn a_lock_at_the_default_value_keeps_its_lock_on_a_write() {
+    let written = beta2("A03-after-write-round1.bin");
+    assert_eq!(
+        st::locks_for(&written, 1, 0, 60, 100, 14),
+        st::Locks { note: true, velocity: true, length: true }
+    );
+}
+
+#[test]
+fn a_step_off_the_end_locks_everything() {
+    let a03 = beta2("A03-baseline.bin");
+    assert_eq!(
+        st::locks_for(&a03, 1, st::NUM_STEPS, 60, 100, 14),
+        st::Locks { note: true, velocity: true, length: true }
+    );
+}

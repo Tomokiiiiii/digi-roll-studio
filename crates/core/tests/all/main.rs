@@ -17,3 +17,4 @@ mod import;
 mod midifile;
 mod record;
 mod session;
+mod syntakt_write;
